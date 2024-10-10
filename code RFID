@@ -24,10 +24,11 @@ String inputCode = ""; // Mã nhập vào
 String storedCode = ""; // Mã đã lưu
 String fixedCode = "1234"; // Mã cố định
 DateTime storedTime; // Thời gian lưu mật khẩu
-unsigned long expiryDuration = 2 * 24 * 60 * 60; // Thời gian hiệu lực của mật khẩu (2 ngày tính bằng giây)
 
 const int ledPin = 13; // Chân LED
 const int relayPin = 12; // Chân relay
+
+const unsigned long codeExpiryTime = 6 * 60; // 6 phút tính bằng giây (360 giây)
 
 void setup() {
   Serial.begin(9600);
@@ -48,25 +49,21 @@ void setup() {
 }
 
 void loop() {
-  DateTime now = rtc.now(); // Lấy thời gian hiện tại
   char key = keypad.getKey();
-
-  // Kiểm tra nếu mật khẩu tự tạo đã hết hạn
-  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + expiryDuration) {
-    Serial.println("Temporary code expired and cleared.");
-    storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
-  }
 
   if (key) {
     // Nếu có phím được nhấn
     if (key == '#') { // Nhấn '#' để xác nhận
       Serial.println("Input Code: " + inputCode);
-      if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + expiryDuration)) {
+      DateTime now = rtc.now(); // Lấy thời gian hiện tại
+      if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + codeExpiryTime)) {
         Serial.println("Access Granted");
         digitalWrite(ledPin, HIGH); // Bật LED
         digitalWrite(relayPin, HIGH); // Mở khóa
-      } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + expiryDuration) {
+      } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
         Serial.println("Code Expired");
+        storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
+        Serial.println("Stored Code Cleared");
         digitalWrite(ledPin, LOW); // Tắt LED
       } else {
         Serial.println("Access Denied");
@@ -81,10 +78,17 @@ void loop() {
     }
   }
 
+  // Kiểm tra nếu mật khẩu tự tạo đã hết hạn
+  DateTime now = rtc.now(); // Lấy thời gian hiện tại
+  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
+    storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
+    Serial.println("Stored Code Automatically Cleared After 6 Minutes");
+  }
+
   // Tạo mật khẩu mới
   if (key == 'A') { // Nhấn 'A' để tạo mật khẩu mới
     storedCode = inputCode; // Lưu mật khẩu
-    storedTime = now; // Ghi lại thời điểm lưu mã
+    storedTime = rtc.now(); // Ghi lại thời điểm lưu mã
     Serial.println("New Code Set: " + storedCode);
     inputCode = ""; // Đặt lại mã nhập
   }
