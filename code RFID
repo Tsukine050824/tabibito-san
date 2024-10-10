@@ -1,0 +1,91 @@
+#include <Keypad.h>
+#include <Wire.h>
+#include <RTClib.h>
+
+const byte ROWS = 4; // Số hàng
+const byte COLS = 4; // Số cột
+
+// Các giá trị cho bàn phím
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+
+// Chân kết nối với bàn phím
+byte rowPins[ROWS] = {9, 8, 7, 6}; // Chân hàng
+byte colPins[COLS] = {5, 4, 3, 2}; // Chân cột
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+RTC_DS3231 rtc; // Khai báo đối tượng RTC
+
+String inputCode = ""; // Mã nhập vào
+String storedCode = ""; // Mã đã lưu
+String fixedCode = "1234"; // Mã cố định
+DateTime storedTime; // Thời gian lưu mật khẩu
+unsigned long expiryDuration = 2 * 24 * 60 * 60; // Thời gian hiệu lực của mật khẩu (2 ngày tính bằng giây)
+
+const int ledPin = 13; // Chân LED
+const int relayPin = 12; // Chân relay
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(ledPin, OUTPUT);
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(ledPin, LOW); // Bắt đầu với LED tắt
+  digitalWrite(relayPin, LOW); // Bắt đầu với relay tắt
+
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, setting the time!");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+}
+
+void loop() {
+  DateTime now = rtc.now(); // Lấy thời gian hiện tại
+  char key = keypad.getKey();
+
+  // Kiểm tra nếu mật khẩu tự tạo đã hết hạn
+  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + expiryDuration) {
+    Serial.println("Temporary code expired and cleared.");
+    storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
+  }
+
+  if (key) {
+    // Nếu có phím được nhấn
+    if (key == '#') { // Nhấn '#' để xác nhận
+      Serial.println("Input Code: " + inputCode);
+      if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + expiryDuration)) {
+        Serial.println("Access Granted");
+        digitalWrite(ledPin, HIGH); // Bật LED
+        digitalWrite(relayPin, HIGH); // Mở khóa
+      } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + expiryDuration) {
+        Serial.println("Code Expired");
+        digitalWrite(ledPin, LOW); // Tắt LED
+      } else {
+        Serial.println("Access Denied");
+        digitalWrite(ledPin, LOW); // Tắt LED
+      }
+      inputCode = ""; // Đặt lại mã nhập
+    } else if (key == '*') { // Nhấn '*' để xóa mã
+      inputCode = ""; // Đặt lại mã nhập
+      Serial.println("Code Cleared");
+    } else if (inputCode.length() < 4) { // Giới hạn chiều dài mã
+      inputCode += key; // Thêm ký tự vào mã nhập
+    }
+  }
+
+  // Tạo mật khẩu mới
+  if (key == 'A') { // Nhấn 'A' để tạo mật khẩu mới
+    storedCode = inputCode; // Lưu mật khẩu
+    storedTime = now; // Ghi lại thời điểm lưu mã
+    Serial.println("New Code Set: " + storedCode);
+    inputCode = ""; // Đặt lại mã nhập
+  }
+}
