@@ -1,11 +1,12 @@
+#include <SPI.h>
+#include <MFRC522.h>
 #include <Keypad.h>
 #include <Wire.h>
 #include <RTClib.h>
 
-const byte ROWS = 4; // Số hàng
-const byte COLS = 4; // Số cột
+const byte ROWS = 4;
+const byte COLS = 4;
 
-// Các giá trị cho bàn phím
 char keys[ROWS][COLS] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
@@ -13,29 +14,45 @@ char keys[ROWS][COLS] = {
   {'*', '0', '#', 'D'}
 };
 
-// Chân kết nối với bàn phím
-byte rowPins[ROWS] = {9, 8, 7, 6}; // Chân hàng
-byte colPins[COLS] = {5, 4, 3, 2}; // Chân cột
+byte rowPins[ROWS] = {9, 8, 7, 6};
+byte colPins[COLS] = {5, 4, 3, 2};
 
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
-RTC_DS3231 rtc; // Khai báo đối tượng RTC
+RTC_DS3231 rtc;
 
-String inputCode = ""; // Mã nhập vào
-String storedCode = ""; // Mã đã lưu
-String fixedCode = "1234"; // Mã cố định
-DateTime storedTime; // Thời gian lưu mật khẩu
+const int RST_PIN = 5; // Chân reset MFRC522
+const int SS_PIN = 10; // Chân SS (SDA) của MFRC522
+MFRC522 mfrc522(SS_PIN, RST_PIN);
 
-const int ledPin = 13; // Chân LED
-const int relayPin = 12; // Chân relay
+String inputCode = "";
+String storedCode = "";
+String fixedCode = "1234";
+DateTime storedTime;
 
-const unsigned long codeExpiryTime = 6 * 60; // 6 phút tính bằng giây (360 giây)
+const int ledPin = 13;
+const int relayPin = 12;
+
+const unsigned long codeExpiryTime = 6 * 60;
+
+bool isChangingPassword = false;
+bool confirmCurrentPassword = false;
+String newPassword = "";
+
+bool isAddingCard = false; // Chế độ thêm thẻ
+bool isRemovingCard = false; // Chế độ xóa thẻ
+
+String allowedRFIDCards[10];
+int rfidCardCount = 0;
 
 void setup() {
   Serial.begin(9600);
   pinMode(ledPin, OUTPUT);
   pinMode(relayPin, OUTPUT);
-  digitalWrite(ledPin, LOW); // Bắt đầu với LED tắt
-  digitalWrite(relayPin, LOW); // Bắt đầu với relay tắt
+  digitalWrite(ledPin, LOW);
+  digitalWrite(relayPin, LOW);
+
+  SPI.begin();
+  mfrc522.PCD_Init();
 
   if (!rtc.begin()) {
     Serial.println("Couldn't find RTC");
@@ -52,44 +69,145 @@ void loop() {
   char key = keypad.getKey();
 
   if (key) {
-    // Nếu có phím được nhấn
-    if (key == '#') { // Nhấn '#' để xác nhận
-      Serial.println("Input Code: " + inputCode);
-      DateTime now = rtc.now(); // Lấy thời gian hiện tại
-      if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + codeExpiryTime)) {
-        Serial.println("Access Granted");
-        digitalWrite(ledPin, HIGH); // Bật LED
-        digitalWrite(relayPin, HIGH); // Mở khóa
-      } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
-        Serial.println("Code Expired");
-        storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
-        Serial.println("Stored Code Cleared");
-        digitalWrite(ledPin, LOW); // Tắt LED
-      } else {
-        Serial.println("Access Denied");
-        digitalWrite(ledPin, LOW); // Tắt LED
-      }
-      inputCode = ""; // Đặt lại mã nhập
-    } else if (key == '*') { // Nhấn '*' để xóa mã
-      inputCode = ""; // Đặt lại mã nhập
-      Serial.println("Code Cleared");
-    } else if (inputCode.length() < 4) { // Giới hạn chiều dài mã
-      inputCode += key; // Thêm ký tự vào mã nhập
+    if (isChangingPassword) {
+      handlePasswordChange(key);
+    } else {
+      handleNormalMode(key);
     }
   }
 
-  // Kiểm tra nếu mật khẩu tự tạo đã hết hạn
-  DateTime now = rtc.now(); // Lấy thời gian hiện tại
-  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
-    storedCode = ""; // Xóa mật khẩu tự tạo khi hết hạn
-    Serial.println("Stored Code Automatically Cleared After 6 Minutes");
+  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    String rfidTag = getRFID();
+
+    if (isAddingCard) {
+      addRFIDCard(rfidTag);
+    } else if (isRemovingCard) {
+      removeRFIDCard(rfidTag);
+    } else {
+      checkAccessWithRFID(rfidTag);
+    }
+
+    mfrc522.PICC_HaltA();
   }
 
-  // Tạo mật khẩu mới
-  if (key == 'A') { // Nhấn 'A' để tạo mật khẩu mới
-    storedCode = inputCode; // Lưu mật khẩu
-    storedTime = rtc.now(); // Ghi lại thời điểm lưu mã
+  DateTime now = rtc.now();
+  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
+    storedCode = "";
+    Serial.println("Stored Code Automatically Cleared After 6 Minutes");
+  }
+}
+
+String getRFID() {
+  String rfidTag = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    rfidTag += String(mfrc522.uid.uidByte[i], HEX);
+  }
+  return rfidTag;
+}
+
+void addRFIDCard(String rfidTag) {
+  if (rfidCardCount < 10) {
+    allowedRFIDCards[rfidCardCount] = rfidTag;
+    rfidCardCount++;
+    Serial.println("Card Added: " + rfidTag);
+  } else {
+    Serial.println("RFID List Full, Cannot Add More Cards.");
+  }
+  isAddingCard = false;
+}
+
+void removeRFIDCard(String rfidTag) {
+  for (int i = 0; i < rfidCardCount; i++) {
+    if (allowedRFIDCards[i] == rfidTag) {
+      Serial.println("Card Removed: " + rfidTag);
+      allowedRFIDCards[i] = allowedRFIDCards[rfidCardCount - 1];
+      rfidCardCount--;
+      break;
+    }
+  }
+  isRemovingCard = false;
+}
+
+void checkAccessWithRFID(String rfidTag) {
+  for (int i = 0; i < rfidCardCount; i++) {
+    if (allowedRFIDCards[i] == rfidTag) {
+      Serial.println("Access Granted with RFID");
+      digitalWrite(ledPin, HIGH);
+      digitalWrite(relayPin, HIGH);
+      delay(5000); // Mở khóa trong 5 giây
+      digitalWrite(ledPin, LOW);
+      digitalWrite(relayPin, LOW);
+      return;
+    }
+  }
+  Serial.println("Access Denied with RFID");
+}
+
+void handleNormalMode(char key) {
+  if (key == '#') {
+    Serial.println("Input Code: " + inputCode);
+    DateTime now = rtc.now();
+    if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + codeExpiryTime)) {
+      Serial.println("Access Granted");
+      digitalWrite(ledPin, HIGH);
+      digitalWrite(relayPin, HIGH);
+    } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
+      Serial.println("Code Expired");
+      storedCode = "";
+      Serial.println("Stored Code Cleared");
+      digitalWrite(ledPin, LOW);
+    } else {
+      Serial.println("Access Denied");
+      digitalWrite(ledPin, LOW);
+    }
+    inputCode = "";
+  } else if (key == '*') {
+    inputCode = "";
+    Serial.println("Code Cleared");
+  } else if (key == 'A') {
+    storedCode = inputCode;
+    storedTime = rtc.now();
     Serial.println("New Code Set: " + storedCode);
-    inputCode = ""; // Đặt lại mã nhập
+    inputCode = "";
+  } else if (key == 'B') {
+    Serial.println("Enter Current Password:");
+    isChangingPassword = true;
+    confirmCurrentPassword = true;
+    inputCode = "";
+  } else if (key == 'C') {
+    Serial.println("Scan a new card to add...");
+    isAddingCard = true;
+  } else if (key == 'D') {
+    Serial.println("Scan a card to remove...");
+    isRemovingCard = true;
+  } else if (inputCode.length() < 4) {
+    inputCode += key;
+  }
+}
+
+void handlePasswordChange(char key) {
+  if (key == '#') {
+    if (confirmCurrentPassword) {
+      if (inputCode == fixedCode) {
+        Serial.println("Current Password Confirmed. Enter New Password:");
+        confirmCurrentPassword = false;
+        inputCode = "";
+      } else {
+        Serial.println("Incorrect Current Password. Exiting Change Mode.");
+        isChangingPassword = false;
+        confirmCurrentPassword = false;
+        inputCode = "";
+      }
+    } else {
+      fixedCode = inputCode;
+      Serial.println("Password Changed Successfully.");
+      isChangingPassword = false;
+      inputCode = "";
+    }
+  } else if (key == '*') {
+    inputCode = "";
+    Serial.println("Code Cleared");
+  } else if (inputCode.length() < 4) {
+    inputCode += key;
   }
 }
