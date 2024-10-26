@@ -1,26 +1,20 @@
 #include <MFRC522.h>                                                                        // Thư viện đọc thẻ RFID
 #include <LiquidCrystal_I2C.h>                                                              // Thư viện màn hình LCD
 #include <Keypad.h>                                                                         // Thư viện bàn phím số
-#include <Servo.h>                                                                          // Thư viện Servo motor
-#include <SPI.h>                                                                            // Thư viện SPI cho MFRC522
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);                                                         // LCD 16x2 với địa chỉ I2C 0x27
 MFRC522 mfrc522(10, 9);                                                                     // MFRC522 RFID trên chân 10 và 9
-Servo sg90;                                                                                 // Servo motor
-constexpr uint8_t greenLed = 7;                                                             // Chân LED xanh
-constexpr uint8_t redLed = 6;                                                               // Chân LED đỏ
-constexpr uint8_t servoPin = 8;                                                             // Chân Servo motor
 constexpr uint8_t buzzerPin = 5;                                                            // Chân Buzzer
 
-char initial_password[4] = {'1', '2', '3', '4'};                                            // Mật khẩu cố định
-char current_password[4];                                                                    // Mật khẩu hiện tại (có thể thay đổi)
-char new_passwords[2][4];                                                                    // Mật khẩu tự tạo (tối đa 2 cái)
+char initial_password[6] = {'1', '2', '3', '4','5','6'};                                     // Mật khẩu cố định
+char current_password[6];                                                                  
+char new_passwords[2][6];                                                                   
 unsigned long new_password_timestamps[2];                                                   // Thời gian tạo mật khẩu tự tạo
 bool new_password_valid[2];                                                                  // Trạng thái hợp lệ của mật khẩu tự tạo
 bool isChangingPassword = false;                                                             // Biến kiểm tra xem có đang ở chế độ thay đổi mật khẩu không
 bool isPasswordChangeAuthorized = false;                                                     // Biến kiểm tra xem có được cấp quyền đổi mật khẩu không
 
-String authorizedTags[2];                                                                    // Mảng chứa các thẻ được phép (tối đa 2 thẻ)
+String authorizedTags[2];                                                                   
 int numAuthorizedTags = 0;                                                                  // Số lượng thẻ được cấp quyền
 boolean RFIDMode = true;                                                                    // Chế độ đọc RFID
 boolean addingTagMode = false;                                                              // Chế độ thêm thẻ RFID
