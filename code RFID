@@ -1,213 +1,153 @@
-#include <SPI.h>
-#include <MFRC522.h>
-#include <Keypad.h>
-#include <Wire.h>
-#include <RTClib.h>
+#include <MFRC522.h>                                                                        // Thư viện đọc thẻ RFID
+#include <LiquidCrystal_I2C.h>                                                              // Thư viện màn hình LCD
+#include <Keypad.h>                                                                         // Thư viện bàn phím số
+#include <Servo.h>                                                                          // Thư viện Servo motor
+#include <SPI.h>                                                                            // Thư viện SPI cho MFRC522
 
-const byte ROWS = 4;
-const byte COLS = 4;
+LiquidCrystal_I2C lcd(0x27, 16, 2);                                                         // LCD 16x2 với địa chỉ I2C 0x27
+MFRC522 mfrc522(10, 9);                                                                     // MFRC522 RFID trên chân 10 và 9
+Servo sg90;                                                                                 // Servo motor
+constexpr uint8_t greenLed = 7;                                                             // Chân LED xanh
+constexpr uint8_t redLed = 6;                                                               // Chân LED đỏ
+constexpr uint8_t servoPin = 8;                                                             // Chân Servo motor
+constexpr uint8_t buzzerPin = 5;                                                            // Chân Buzzer
 
-char keys[ROWS][COLS] = {
+char initial_password[4] = {'1', '2', '3', '4'};                                            // Mật khẩu cố định
+String authorizedTags[2];                                                                  // Mảng chứa các thẻ được phép (tối đa 2 thẻ)
+int numAuthorizedTags = 0;                                                                  // Số lượng thẻ được cấp quyền
+boolean RFIDMode = true;                                                                    // Chế độ đọc RFID
+boolean addingTagMode = false;                                                              // Chế độ thêm thẻ RFID
+boolean deletingTagMode = false;                                                            // Chế độ xóa thẻ RFID
+char key_pressed = 0;                                                                       // Biến lưu phím nhấn
+
+const byte rows = 4;                                                                        // Số hàng bàn phím
+const byte columns = 4;                                                                     // Số cột bàn phím
+
+char hexaKeys[rows][columns] = {
   {'1', '2', '3', 'A'},
   {'4', '5', '6', 'B'},
   {'7', '8', '9', 'C'},
   {'*', '0', '#', 'D'}
 };
 
-byte rowPins[ROWS] = {9, 8, 7, 6};
-byte colPins[COLS] = {5, 4, 3, 2};
+byte row_pins[rows] = {A0, A1, A2, A3};                                                     // Chân hàng bàn phím
+byte column_pins[columns] = {2, 1, 0};                                                      // Chân cột bàn phím
 
-Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
-RTC_DS3231 rtc;
-
-const int RST_PIN = 5; // Chân reset MFRC522
-const int SS_PIN = 10; // Chân SS (SDA) của MFRC522
-MFRC522 mfrc522(SS_PIN, RST_PIN);
-
-String inputCode = "";
-String storedCode = "";
-String fixedCode = "1234";
-DateTime storedTime;
-
-const int ledPin = 13;
-const int relayPin = 12;
-
-const unsigned long codeExpiryTime = 6 * 60;
-
-bool isChangingPassword = false;
-bool confirmCurrentPassword = false;
-String newPassword = "";
-
-bool isAddingCard = false; // Chế độ thêm thẻ
-bool isRemovingCard = false; // Chế độ xóa thẻ
-
-String allowedRFIDCards[10];
-int rfidCardCount = 0;
+Keypad keypad_key = Keypad(makeKeymap(hexaKeys), row_pins, column_pins, rows, columns);     // Khởi tạo đối tượng Keypad
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(ledPin, OUTPUT);
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(ledPin, LOW);
-  digitalWrite(relayPin, LOW);
-
+  pinMode(buzzerPin, OUTPUT);
+  pinMode(redLed, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  sg90.attach(servoPin);
+  sg90.write(0);
+  lcd.init();
+  lcd.backlight();
   SPI.begin();
   mfrc522.PCD_Init();
+  lcd.clear();
+  Serial.begin(9600);
+}
 
-  if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
-    while (1);
+void beep() {
+  digitalWrite(buzzerPin, HIGH);
+  delay(100);
+  digitalWrite(buzzerPin, LOW);
+}
+
+// Kiểm tra xem thẻ có nằm trong danh sách được phép không
+boolean isAuthorized(String tag) {
+  for (int i = 0; i < numAuthorizedTags; i++) {
+    if (authorizedTags[i] == tag) {
+      return true;
+    }
   }
+  return false;
+}
 
-  if (rtc.lostPower()) {
-    Serial.println("RTC lost power, setting the time!");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+// Thêm thẻ vào danh sách được phép
+void addTag(String tag) {
+  if (numAuthorizedTags < 2) {
+    authorizedTags[numAuthorizedTags] = tag;
+    numAuthorizedTags++;
+    lcd.clear();
+    lcd.print("The Da Duoc Them");
+  } else {
+    lcd.clear();
+    lcd.print("Bo Nho Day");
+  }
+}
+
+// Xóa thẻ khỏi danh sách được phép
+void deleteTag(String tag) {
+  for (int i = 0; i < numAuthorizedTags; i++) {
+    if (authorizedTags[i] == tag) {
+      for (int j = i; j < numAuthorizedTags - 1; j++) {
+        authorizedTags[j] = authorizedTags[j + 1];
+      }
+      numAuthorizedTags--;
+      lcd.clear();
+      lcd.print("The Da Xoa");
+      return;
+    }
   }
 }
 
 void loop() {
-  char key = keypad.getKey();
+  // Kiểm tra xem chế độ hiện tại có phải là chế độ đọc RFID không
+  if (RFIDMode == true) {                                                                   // Nếu đang ở chế độ đọc RFID
+    lcd.setCursor(0, 0);                                                                    // Đặt con trỏ LCD ở vị trí đầu dòng
+    lcd.print("Quet The RFID");                                                             // Hiển thị thông báo "Quét Thẻ RFID" trên màn hình LCD
+    
+    // Kiểm tra xem có thẻ mới được quét không
+    if (!mfrc522.PICC_IsNewCardPresent()) return;                                          // Nếu không có thẻ mới, thoát khỏi hàm (không làm gì)
+    if (!mfrc522.PICC_ReadCardSerial()) return;                                            // Nếu không đọc được thẻ, thoát khỏi hàm (không làm gì)
 
-  if (key) {
-    if (isChangingPassword) {
-      handlePasswordChange(key);
-    } else {
-      handleNormalMode(key);
+    String tag = "";                                                                        // Biến lưu UID của thẻ
+    // Lặp qua từng byte của UID và chuyển đổi chúng thành chuỗi HEX
+    for (byte i = 0; i < mfrc522.uid.size; i++) {                                          // Duyệt qua tất cả các byte trong UID
+      tag.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " "));                    // Thêm "0" nếu byte nhỏ hơn 0x10 để chuẩn hóa định dạng
+      tag.concat(String(mfrc522.uid.uidByte[i], HEX));                                     // Chuyển byte sang dạng HEX và thêm vào chuỗi tag
+    }
+    tag.toUpperCase();                                                                       // Chuyển toàn bộ ký tự trong tag thành chữ hoa
+    lcd.clear();                                                                            // Xóa nội dung hiện tại trên màn hình LCD
+
+    // Kiểm tra xem thẻ quét có nằm trong danh sách thẻ được phép hay không
+    if (isAuthorized(tag)) {                                                                 // Nếu thẻ đã được cấp quyền
+      lcd.print("The Da Khop");                                                             // Hiển thị thông báo "Thẻ Đã Khớp"
+      beep();                                                                                // Gọi hàm beep để phát âm thanh
+      delay(500);                                                                           // Delay 500ms để cho người dùng có thời gian nhìn thấy thông báo
+      lcd.clear();                                                                          // Xóa màn hình
+      lcd.print("Nhap A Them");                                                             // Hiển thị hướng dẫn "Nhập A Để Thêm Thẻ"
+      lcd.setCursor(0, 1);                                                                  // Đặt con trỏ LCD ở dòng thứ hai
+      lcd.print("Nhap B Xoa");                                                             // Hiển thị hướng dẫn "Nhập B Để Xóa Thẻ"
+      RFIDMode = false;                                                                      // Đặt chế độ RFIDMode thành false để chuyển sang chế độ nhập
+      deletingTagMode = true;                                                                // Bật chế độ xóa thẻ
+    } else {                                                                                  // Nếu thẻ chưa được cấp quyền
+      lcd.print("The Moi");                                                                  // Hiển thị thông báo "Thẻ Mới"
+      lcd.setCursor(0, 1);                                                                  // Đặt con trỏ LCD ở dòng thứ hai
+      lcd.print("Nhap A De Them");                                                          // Hiển thị hướng dẫn "Nhập A Để Thêm Thẻ"
+      RFIDMode = false;                                                                      // Đặt chế độ RFIDMode thành false để chuyển sang chế độ nhập
+      addingTagMode = true;                                                                  // Bật chế độ thêm thẻ
     }
   }
 
-  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-    String rfidTag = getRFID();
-
-    if (isAddingCard) {
-      addRFIDCard(rfidTag);
-    } else if (isRemovingCard) {
-      removeRFIDCard(rfidTag);
-    } else {
-      checkAccessWithRFID(rfidTag);
+  // Kiểm tra xem có đang ở chế độ thêm hoặc xóa thẻ không
+  if (addingTagMode || deletingTagMode) {                                                  // Nếu đang ở chế độ thêm hoặc xóa thẻ
+    key_pressed = keypad_key.getKey();                                                     // Lấy phím nhấn từ bàn phím
+    // Kiểm tra xem phím nhấn có phải là 'A' và chế độ hiện tại là thêm thẻ không
+    if (key_pressed == 'A' && addingTagMode) {                                             // Nếu nhấn phím A trong chế độ thêm thẻ
+      addTag(tag);                                                                          // Gọi hàm thêm thẻ với UID đã quét
+      addingTagMode = false;                                                                // Tắt chế độ thêm thẻ
+      RFIDMode = true;                                                                       // Quay lại chế độ đọc RFID
+      delay(2000);                                                                           // Delay 2000ms để hiển thị thông báo thêm thành công
+      lcd.clear();                                                                           // Xóa màn hình
+    } else if (key_pressed == 'B' && deletingTagMode) {                                    // Nếu nhấn phím B trong chế độ xóa thẻ
+      deleteTag(tag);                                                                        // Gọi hàm xóa thẻ với UID đã quét
+      deletingTagMode = false;                                                              // Tắt chế độ xóa thẻ
+      RFIDMode = true;                                                                       // Quay lại chế độ đọc RFID
+      delay(2000);                                                                           // Delay 2000ms để hiển thị thông báo xóa thành công
+      lcd.clear();                                                                           // Xóa màn hình
     }
-
-    mfrc522.PICC_HaltA();
-  }
-
-  DateTime now = rtc.now();
-  if (storedCode != "" && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
-    storedCode = "";
-    Serial.println("Stored Code Automatically Cleared After 6 Minutes");
-  }
-}
-
-String getRFID() {
-  String rfidTag = "";
-  for (byte i = 0; i < mfrc522.uid.size; i++) {
-    rfidTag += String(mfrc522.uid.uidByte[i], HEX);
-  }
-  return rfidTag;
-}
-
-void addRFIDCard(String rfidTag) {
-  if (rfidCardCount < 10) {
-    allowedRFIDCards[rfidCardCount] = rfidTag;
-    rfidCardCount++;
-    Serial.println("Card Added: " + rfidTag);
-  } else {
-    Serial.println("RFID List Full, Cannot Add More Cards.");
-  }
-  isAddingCard = false;
-}
-
-void removeRFIDCard(String rfidTag) {
-  for (int i = 0; i < rfidCardCount; i++) {
-    if (allowedRFIDCards[i] == rfidTag) {
-      Serial.println("Card Removed: " + rfidTag);
-      allowedRFIDCards[i] = allowedRFIDCards[rfidCardCount - 1];
-      rfidCardCount--;
-      break;
-    }
-  }
-  isRemovingCard = false;
-}
-
-void checkAccessWithRFID(String rfidTag) {
-  for (int i = 0; i < rfidCardCount; i++) {
-    if (allowedRFIDCards[i] == rfidTag) {
-      Serial.println("Access Granted with RFID");
-      digitalWrite(ledPin, HIGH);
-      digitalWrite(relayPin, HIGH);
-      delay(5000); // Mở khóa trong 5 giây
-      digitalWrite(ledPin, LOW);
-      digitalWrite(relayPin, LOW);
-      return;
-    }
-  }
-  Serial.println("Access Denied with RFID");
-}
-
-void handleNormalMode(char key) {
-  if (key == '#') {
-    Serial.println("Input Code: " + inputCode);
-    DateTime now = rtc.now();
-    if (inputCode == fixedCode || (inputCode == storedCode && now.unixtime() <= storedTime.unixtime() + codeExpiryTime)) {
-      Serial.println("Access Granted");
-      digitalWrite(ledPin, HIGH);
-      digitalWrite(relayPin, HIGH);
-    } else if (inputCode == storedCode && now.unixtime() > storedTime.unixtime() + codeExpiryTime) {
-      Serial.println("Code Expired");
-      storedCode = "";
-      Serial.println("Stored Code Cleared");
-      digitalWrite(ledPin, LOW);
-    } else {
-      Serial.println("Access Denied");
-      digitalWrite(ledPin, LOW);
-    }
-    inputCode = "";
-  } else if (key == '*') {
-    inputCode = "";
-    Serial.println("Code Cleared");
-  } else if (key == 'A') {
-    storedCode = inputCode;
-    storedTime = rtc.now();
-    Serial.println("New Code Set: " + storedCode);
-    inputCode = "";
-  } else if (key == 'B') {
-    Serial.println("Enter Current Password:");
-    isChangingPassword = true;
-    confirmCurrentPassword = true;
-    inputCode = "";
-  } else if (key == 'C') {
-    Serial.println("Scan a new card to add...");
-    isAddingCard = true;
-  } else if (key == 'D') {
-    Serial.println("Scan a card to remove...");
-    isRemovingCard = true;
-  } else if (inputCode.length() < 4) {
-    inputCode += key;
-  }
-}
-
-void handlePasswordChange(char key) {
-  if (key == '#') {
-    if (confirmCurrentPassword) {
-      if (inputCode == fixedCode) {
-        Serial.println("Current Password Confirmed. Enter New Password:");
-        confirmCurrentPassword = false;
-        inputCode = "";
-      } else {
-        Serial.println("Incorrect Current Password. Exiting Change Mode.");
-        isChangingPassword = false;
-        confirmCurrentPassword = false;
-        inputCode = "";
-      }
-    } else {
-      fixedCode = inputCode;
-      Serial.println("Password Changed Successfully.");
-      isChangingPassword = false;
-      inputCode = "";
-    }
-  } else if (key == '*') {
-    inputCode = "";
-    Serial.println("Code Cleared");
-  } else if (inputCode.length() < 4) {
-    inputCode += key;
   }
 }
