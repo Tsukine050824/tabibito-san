@@ -62,7 +62,7 @@ void openDoor() {
   RFIDMode = false;
 }
 
-boolean checkPassword(char* input_password) {
+boolean checkPassword(const char* input_password) {
   if (strncmp(input_password, initial_password, 7) == 0) {
     return true;
   }
@@ -304,7 +304,7 @@ void loop() {
           break;
         }
       }
-    } else if (checkPassword(tag)) {
+    } else if (checkPassword(tag.c_str())) {
       openDoor();
     } else {
       incorrectAttemptCount++;
@@ -327,7 +327,7 @@ void loop() {
         } else {
           incorrectAttemptCount++;
           if (incorrectAttemptCount >= 3) {
-            beep(5000)
+            beep(5000);
             lockDoor();
             RFIDMode = true;
             incorrectAttemptCount = 0;
