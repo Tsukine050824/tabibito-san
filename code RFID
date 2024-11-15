@@ -1,341 +1,307 @@
-#include <MFRC522.h>
-#include <LiquidCrystal_I2C.h>
-#include <Keypad.h>
+#include <MFRC522.h>              // Thư viện để điều khiển cảm biến RFID
+#include <LiquidCrystal_I2C.h>     // Thư viện để điều khiển màn hình LCD qua I2C
+#include <Keypad.h>                // Thư viện để điều khiển bàn phím ma trận (keypad)
 
+// Khởi tạo đối tượng LCD với địa chỉ I2C 0x27 và màn hình 16x2
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-MFRC522 mfrc522(10, 9);
+
+// Định nghĩa chân kết nối cho buzzer
 constexpr uint8_t buzzerPin = 5;
+boolean doorOpened = false;       // Biến lưu trạng thái cửa (đã mở hay chưa)
 
-char initial_password[7];
-char additional_passwords[2][7];
-String additional_tags[2];
-int additional_password_count = 0;
-
-String masterTagUID = "";
-char password[7];
-boolean RFIDMode = true;
-boolean addPasswordMode = false;
-boolean deleteTagMode = false; // Biến để theo dõi chế độ xóa thẻ phụ
-char newPassword[7];
-uint8_t i = 0;
-boolean doorOpened = false;
-int incorrectAttemptCount = 0;
-
+// Cấu hình cho Keypad với 4 hàng và 3 cột
 const byte rows = 4;
 const byte columns = 3;
-
-char hexaKeys[rows][columns] = {
+char hexaKeys[rows][columns] = {   // Mảng chứa các phím của bàn phím ma trận
   {'1', '2', '3'},
   {'4', '5', '6'},
   {'7', '8', '9'},
   {'*', '0', '#'}
 };
 
-byte row_pins[rows] = {A0, A1, A2, A3};
-byte column_pins[columns] = {2, 1, 0};
+// Các chân kết nối cho hàng và cột của keypad
+byte row_pins[rows] = {A0, A1, A2, A3};  // Chân kết nối hàng
+byte column_pins[columns] = {2, 1, 0};   // Chân kết nối cột
 
+// Khởi tạo đối tượng keypad với các cấu hình trên
 Keypad keypad_key = Keypad(makeKeymap(hexaKeys), row_pins, column_pins, rows, columns);
 
-void setup() {
-  pinMode(buzzerPin, OUTPUT);
-  lcd.init();
-  lcd.backlight();
-  mfrc522.PCD_Init();
-  lcd.clear();
-}
+// Lớp quản lý các chức năng RFID
+class RFIDFunctions {
+public:
+  MFRC522 mfrc522;                       // Đối tượng để điều khiển cảm biến RFID
+  String masterTagUID = "";               // Biến lưu UID của thẻ chính
+  String additional_tags[2];              // Mảng chứa tối đa 2 thẻ phụ
+  int additional_tag_count = 0;           // Biến đếm số thẻ phụ đã được lưu
+  int incorrectAttemptCount = 0;          // Biến đếm số lần nhập sai mật khẩu
 
-void beep(uint16_t duration) {
-  digitalWrite(buzzerPin, HIGH);
-  delay(duration);
-  digitalWrite(buzzerPin, LOW);
-}
+  // Hàm khởi tạo với các chân kết nối cho RFID
+  RFIDFunctions(uint8_t ssPin, uint8_t rstPin) : mfrc522(ssPin, rstPin) {}
 
-void openDoor() {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Mo Cua...");
-  beep(100);
-  delay(3000);
-  doorOpened = true;
-  i = 0;
-  incorrectAttemptCount = 0;
-  RFIDMode = false;
-}
-
-boolean checkPassword(const char* input_password) {
-  if (strncmp(input_password, initial_password, 7) == 0) {
-    return true;
+  // Hàm khởi tạo RFID
+  void init() {
+    mfrc522.PCD_Init();  // Khởi tạo cảm biến RFID
   }
-  for (int j = 0; j < additional_password_count; j++) {
-    if (strncmp(input_password, additional_passwords[j], 7) == 0) {
-      return true;
+
+  // Hàm thiết lập thẻ chính (Master Tag)
+  void setMasterTag() {
+    lcd.clear();                      // Xóa màn hình LCD
+    lcd.print("Quet The Chinh:");      // Hiển thị yêu cầu quét thẻ chính
+    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {  // Kiểm tra thẻ RFID mới quét
+      masterTagUID = getTag();         // Lấy UID của thẻ quét được và lưu vào biến masterTagUID
+      mfrc522.PICC_HaltA();            // Dừng đọc thẻ hiện tại
+      lcd.clear();                     // Xóa màn hình LCD
+      lcd.print("Da Luu The Chinh");   // Thông báo đã lưu thẻ chính
+      delay(2000);                     // Dừng lại trong 2 giây
     }
   }
-  return false;
-}
 
-void addPassword() {
-  if (i >= 6) { // Kiểm tra độ dài mật khẩu hợp lệ
-    if (additional_password_count < 2) {
-      strncpy(additional_passwords[additional_password_count], newPassword, 6);
-      additional_passwords[additional_password_count][7] = '\0';
-      additional_password_count++;
-      lcd.clear();
-      lcd.print("Mat Khau Da Them");
-      delay(2000);
-    } else {
-      lcd.clear();
-      lcd.print("Da Dat Gioi Han");
-      delay(2000);
+  // Hàm lấy UID của thẻ
+  String getTag() {
+    String tag = "";                   // Khởi tạo biến lưu UID của thẻ
+    for (byte j = 0; j < mfrc522.uid.size; j++) {  // Lặp qua tất cả các byte UID
+      tag.concat(String(mfrc522.uid.uidByte[j], HEX));  // Chuyển từng byte UID thành hex và nối vào chuỗi
     }
-  } else {
-    lcd.clear();
-    lcd.print("Mat Khau Khong Hop Le");
-    delay(2000);
-  }
-  i = 0;
-}
-
-void addTag(String tagToAdd) {
-  // Kiểm tra xem thẻ vừa quét có trùng với thẻ chính không
-  if (tagToAdd == masterTagUID) {
-    lcd.clear();
-    lcd.print("Khong The Them");
-    delay(2000);
-    return;
+    tag.toUpperCase();                // Chuyển UID thành chữ in hoa để dễ so sánh
+    return tag;                        // Trả về UID của thẻ
   }
 
-  // Kiểm tra xem thẻ đã tồn tại trong danh sách thẻ phụ chưa
-  for (int j = 0; j < additional_password_count; j++) {
-    if (additional_tags[j] == tagToAdd) {
+  // Hàm thêm thẻ phụ
+  void addTag(String tagToAdd) {
+    if (tagToAdd == masterTagUID) {   // Nếu thẻ thêm vào là thẻ chính thì không cho phép thêm
       lcd.clear();
-      lcd.print("The Da Ton Tai");
+      lcd.print("Khong The Them");     // Hiển thị thông báo không thể thêm thẻ chính
       delay(2000);
       return;
     }
-  }
 
-  // Thêm thẻ nếu vẫn còn chỗ trống
-  if (additional_password_count < 2) {
-    additional_tags[additional_password_count] = tagToAdd;
-    additional_password_count++;
-    lcd.clear();
-    lcd.print("Them The Thanh Cong");
-    delay(2000);
-  } else {
-    lcd.clear();
-    lcd.print("Da Dat Gioi Han");
-    delay(2000);
-  }
-}
-
-void setMasterTag() {
-  lcd.clear();
-  lcd.print("Quet The Chinh:");
-  if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-    String tag = "";
-    for (byte j = 0; j < mfrc522.uid.size; j++) {
-      tag.concat(String(mfrc522.uid.uidByte[j], HEX));
-    }
-    tag.toUpperCase();
-    
-    masterTagUID = tag;
-    mfrc522.PICC_HaltA();
-    lcd.clear();
-    lcd.print("Da Luu The Chinh");
-    delay(2000);
-  }
-}
-
-void setInitialPassword() {
-  lcd.clear();
-  lcd.print("Nhap Mat Khau:");
-  i = 0;
-  while (i < 8) {
-    char key_pressed = keypad_key.getKey();
-    if (key_pressed && key_pressed != '*' && key_pressed != '#') {
-      initial_password[i] = key_pressed;
-      i++;
-      initial_password[i] = '\0';
-      lcd.setCursor(i, 1);
-      lcd.print('*');
-    } else if (key_pressed == '#') {
-      if (i >= 4) { // Đảm bảo mật khẩu có ít nhất 4 ký tự
-        break;
-      } else {
+    // Kiểm tra xem thẻ đã tồn tại trong danh sách thẻ phụ chưa
+    for (int j = 0; j < additional_tag_count; j++) {
+      if (additional_tags[j] == tagToAdd) {
         lcd.clear();
-        lcd.print("Mat Khau Khong Hop Le");
+        lcd.print("The Da Ton Tai");   // Thông báo nếu thẻ đã tồn tại
         delay(2000);
-        lcd.clear();
-        lcd.print("Nhap Lai Mat Khau:");
-        i = 0; // Reset nhập mật khẩu
+        return;
       }
     }
-  }
-}
 
-void lockDoor() {
-  lcd.clear();
-  lcd.print("Cua Da Khoa");
-  lcd.setCursor(0, 1);
-  lcd.print("Vui Long Quet The");
-  
-  for (int j = 0; j < 5; j++) {
-    beep(100);
-    delay(1000);
-  }
-}
-
-void deleteTag(String tagToDelete) {
-  boolean found = false;
-  for (int j = 0; j < additional_password_count; j++) {
-    if (additional_tags[j] == tagToDelete) {
-      found = true;
-      for (int k = j; k < additional_password_count - 1; k++) {
-        strcpy(additional_passwords[k], additional_passwords[k + 1]);
-        additional_tags[k] = additional_tags[k + 1];
-      }
-      additional_password_count--;
+    // Kiểm tra nếu danh sách thẻ phụ chưa đủ 2 thẻ, thì thêm thẻ vào
+    if (additional_tag_count < 2) {
+      additional_tags[additional_tag_count++] = tagToAdd;  // Thêm thẻ vào mảng
       lcd.clear();
-      lcd.print("The Da Xoa");
+      lcd.print("Them The Thanh Cong");   // Thông báo thêm thẻ thành công
       delay(2000);
-      break;
+    } else {
+      lcd.clear();
+      lcd.print("Da Dat Gioi Han");  // Thông báo nếu đã đủ 2 thẻ phụ
+      delay(2000);
     }
   }
-  if (!found) {
-    lcd.clear();
-    lcd.print("The Khong Hop Le");
-    delay(2000);
+
+  // Hàm xóa thẻ phụ
+  void deleteTag(String tagToDelete) {
+    bool found = false;   // Biến lưu trạng thái xem có tìm thấy thẻ cần xóa hay không
+    for (int j = 0; j < additional_tag_count; j++) {
+      if (additional_tags[j] == tagToDelete) {  // Nếu thẻ tìm thấy trong danh sách thẻ phụ
+        found = true;    // Đánh dấu tìm thấy thẻ
+        for (int k = j; k < additional_tag_count - 1; k++) {
+          additional_tags[k] = additional_tags[k + 1];  // Dịch chuyển các thẻ còn lại lên
+        }
+        additional_tag_count--;  // Giảm số lượng thẻ phụ
+        lcd.clear();
+        lcd.print("The Da Xoa");  // Thông báo xóa thẻ thành công
+        delay(2000);
+        break;
+      }
+    }
+    if (!found) {  // Nếu không tìm thấy thẻ cần xóa
+      lcd.clear();
+      lcd.print("The Khong Hop Le");  // Thông báo không tìm thấy thẻ
+      delay(2000);
+    }
   }
+
+  // Hàm khóa cửa và yêu cầu quét thẻ sau 3 lần nhập mật khẩu sai
+  void lockDoor() {
+    lcd.clear();
+    lcd.print("Cua Da Khoa");  // Thông báo cửa đã bị khóa
+    lcd.setCursor(0, 1);
+    lcd.print("Vui Long Quet The");  // Yêu cầu quét thẻ để mở cửa
+    for (int j = 0; j < 5; j++) {  // Bật còi trong 5 giây
+      beep(100);  // Gọi hàm beep để phát còi
+      delay(1000);  // Dừng một giây giữa mỗi lần beep
+    }
+    incorrectAttemptCount = 0;  // Đặt lại số lần nhập mật khẩu sai
+  }
+};
+
+// Lớp quản lý các chức năng bàn phím (keypad)
+class KeypadFunctions {
+public:
+  char initial_password[7];           // Mật khẩu chính
+  char additional_passwords[2][7];    // Mảng chứa mật khẩu phụ
+  int additional_password_count = 0;  // Số lượng mật khẩu phụ
+  char enteredPassword[7];            // Mật khẩu người dùng nhập vào
+  uint8_t passwordIndex = 0;          // Biến chỉ vị trí nhập của ký tự mật khẩu
+
+  // Hàm thiết lập mật khẩu chính
+  void setInitialPassword() {
+    lcd.clear();
+    lcd.print("Nhap Mat Khau:");  // Hiển thị yêu cầu nhập mật khẩu
+    passwordIndex = 0;            // Đặt lại vị trí nhập mật khẩu
+    while (passwordIndex < 8) {   // Lặp lại khi chưa nhập đủ 7 ký tự
+      char key_pressed = keypad_key.getKey();  // Lấy phím nhấn từ keypad
+      if (key_pressed && key_pressed != '*' && key_pressed != '#') {  // Kiểm tra nếu phím nhấn là số
+        initial_password[passwordIndex] = key_pressed;  // Lưu ký tự vào mảng mật khẩu
+        passwordIndex++;  // Tăng chỉ số để nhập ký tự tiếp theo
+        lcd.setCursor(passwordIndex, 1);
+        lcd.print('*');    // Hiển thị dấu '*' trên màn hình LCD
+      } else if (key_pressed == '#') {  // Nếu nhấn '#' thì kiểm tra mật khẩu
+        if (passwordIndex >= 4) {      // Kiểm tra độ dài mật khẩu hợp lệ (tối thiểu 4 ký tự)
+          initial_password[passwordIndex] = '\0';  // Kết thúc mật khẩu nhập vào
+          break;
+        } else {
+          lcd.clear();  // Nếu mật khẩu quá ngắn, yêu cầu nhập lại
+          lcd.print("Mat Khau Sai");
+          delay(2000);   // Dừng trong 2 giây
+          lcd.clear();
+          lcd.print("Nhap Lai Mat Khau");
+          passwordIndex = 0;
+        }
+      }
+    }
+  }
+
+  // Hàm kiểm tra mật khẩu
+  bool checkPassword(char* enteredPassword) {
+    if (strcmp(enteredPassword, initial_password) == 0) {
+      return true;  // Nếu mật khẩu chính đúng, trả về true
+    }
+    for (int i = 0; i < additional_password_count; i++) {
+      if (strcmp(enteredPassword, additional_passwords[i]) == 0) {
+        return true;  // Nếu mật khẩu phụ đúng, trả về true
+      }
+    }
+    return false;  // Nếu không có mật khẩu nào đúng, trả về false
+  }
+
+  // Hàm thêm mật khẩu phụ
+  void addPassword(char* newPassword) {
+    if (additional_password_count < 2) {
+      strcpy(additional_passwords[additional_password_count], newPassword);  // Lưu mật khẩu phụ vào mảng
+      additional_password_count++;  // Tăng số lượng mật khẩu phụ
+      lcd.clear();
+      lcd.print("Them Mat Khau Thanh Cong");  // Thông báo thêm mật khẩu thành công
+      delay(2000);
+    } else {
+      lcd.clear();
+      lcd.print("Da Dat Gioi Han");  // Thông báo đã đủ số lượng mật khẩu phụ
+      delay(2000);
+    }
+  }
+};
+
+// Khởi tạo đối tượng RFID và keypad
+RFIDFunctions rfidFunctions(10, 9);  // Đối tượng RFID với các chân SS và RST là 10 và 9
+KeypadFunctions keypadFunctions;     // Đối tượng keypad
+
+// Hàm phát còi
+void beep(int duration) {
+  tone(buzzerPin, 1000);   // Phát âm tần số 1000Hz
+  delay(duration);         // Đợi thời gian đã định
+  noTone(buzzerPin);       // Tắt còi
+}
+
+// Hàm mở cửa (chức năng mở cửa là giả lập, bạn có thể thay đổi tùy theo yêu cầu)
+void openDoor() {
+  lcd.clear();
+  lcd.print("Cua Da Mo");  // Hiển thị thông báo cửa đã mở
+  doorOpened = true;       // Đặt trạng thái cửa là đã mở
+  delay(2000);             // Dừng trong 2 giây
+}
+
+// Hàm chính
+void setup() {
+  pinMode(buzzerPin, OUTPUT);  // Đặt chân buzzer là output
+  lcd.begin(16, 2);            // Khởi tạo màn hình LCD 16x2
+  rfidFunctions.init();        // Khởi tạo RFID
 }
 
 void loop() {
-  // Nếu mật khẩu chính và thẻ chính chưa được thiết lập, yêu cầu thiết lập
-  if (masterTagUID == "") {
-    setInitialPassword(); // Thiết lập mật khẩu chính
-    setMasterTag(); // Thiết lập thẻ chính
-    return;
+  // Kiểm tra nếu chưa thiết lập thẻ chính và mật khẩu chính
+  if (rfidFunctions.masterTagUID == "") {  // Nếu thẻ chính chưa được thiết lập (masterTagUID rỗng)
+    keypadFunctions.setInitialPassword();  // Thiết lập mật khẩu chính (yêu cầu người dùng nhập mật khẩu)
+    rfidFunctions.setMasterTag();          // Thiết lập thẻ chính (yêu cầu quét thẻ chính)
+    return;  // Dừng lại ở đây nếu thẻ chính và mật khẩu chưa được thiết lập
   }
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Vui Long Nhap");
+  lcd.clear();  // Xóa màn hình LCD
+  lcd.print("Vui Long Nhap");  // Hiển thị thông báo yêu cầu người dùng nhập thông tin
 
-  if (RFIDMode) {
-    lcd.setCursor(1, 1);
-    lcd.print("Quet The RFID");
+  // Kiểm tra nếu có thẻ RFID được quét
+  if (rfidFunctions.mfrc522.PICC_IsNewCardPresent() && rfidFunctions.mfrc522.PICC_ReadCardSerial()) {  // Nếu có thẻ mới quét được
+    String tag = rfidFunctions.getTag();  // Lấy UID của thẻ vừa quét
+    if (tag == rfidFunctions.masterTagUID) {  // Nếu thẻ quét là thẻ chính (so sánh UID)
+      // Hiển thị menu nếu là thẻ chính
+      lcd.clear();  // Xóa màn hình LCD
+      lcd.print("Menu: 1-Thêm MK");  // Hiển thị tùy chọn thêm mật khẩu
+      lcd.setCursor(0, 1);  // Đặt con trỏ ở dòng thứ hai của màn hình LCD
+      lcd.print("2-Xóa Thẻ 3-Thêm Thẻ");  // Hiển thị các tùy chọn xóa thẻ hoặc thêm thẻ phụ
 
-    if (!mfrc522.PICC_IsNewCardPresent()) {
-      return;
-    }
-    if (!mfrc522.PICC_ReadCardSerial()) {
-      return;
-    }
-
-    String tag = "";
-    for (byte j = 0; j < mfrc522.uid.size; j++) {
-      tag.concat(String(mfrc522.uid.uidByte[j], HEX));
-    }
-    tag.toUpperCase();
-
-    if (tag == masterTagUID) {
-      while (true) {
-        char key_pressed = keypad_key.getKey();
-        if (key_pressed == '1' && doorOpened) {
-          addPasswordMode = true;
-          lcd.clear();
-          lcd.print("Nhap Mat Khau Moi:");
-          i = 0;
-          while (i < 8) {
-            key_pressed = keypad_key.getKey();
-            if (key_pressed && key_pressed != '*' && key_pressed != '#') {
-              newPassword[i] = key_pressed;
-              i++;
-              newPassword[i] = '\0';
-              lcd.setCursor(i, 1);
-              lcd.print('*');
-            } else if (key_pressed == '*') {
-              i = 0;
-              lcd.clear();
-              lcd.print("Nhap Mat Khau Moi:");
-            } else if (key_pressed == '#') {
-              addPassword();
-              break;
-            }
-          }
-          break;
-        } else if (key_pressed == '2' && doorOpened) {
-          deleteTagMode = true;
-          lcd.clear();
-          lcd.print("Quet The Can Xoa:");
-          while (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial());
-          String tagToDelete = "";
-          for (byte j = 0; j < mfrc522.uid.size; j++) {
-            tagToDelete.concat(String(mfrc522.uid.uidByte[j], HEX));
-          }
-          tagToDelete.toUpperCase();
-          mfrc522.PICC_HaltA();
-          lcd.clear();
-          lcd.print("Xoa The? *:Co #:Khong");
-          while (true) {
-            key_pressed = keypad_key.getKey();
-            if (key_pressed == '*') {
-              deleteTag(tagToDelete);
-              break;
-            } else if (key_pressed == '#') {
-              lcd.clear();
-              lcd.print("Huy Xoa The");
-              delay(2000);
-              break;
-            }
-          }
-          break;
-        } else if (key_pressed == '3' && doorOpened) { // Thêm thẻ phụ
-          lcd.clear();
-          lcd.print("Quet The Phu:");
-          while (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial());
-          String tagToAdd = "";
-          for (byte j = 0; j < mfrc522.uid.size; j++) {
-            tagToAdd.concat(String(mfrc522.uid.uidByte[j], HEX));
-          }
-          tagToAdd.toUpperCase();
-          mfrc522.PICC_HaltA();
-          addTag(tagToAdd);
-          break;
-        }
-      }
-    } else if (checkPassword(tag.c_str())) {
-      openDoor();
-    } else {
-      incorrectAttemptCount++;
-      if (incorrectAttemptCount >= 3) {
-        lockDoor();
-        RFIDMode = false;
-        incorrectAttemptCount = 0;
-      }
-    }
-  } else {
-    char key_pressed = keypad_key.getKey();
-    if (key_pressed) {
-      password[i] = key_pressed;
-      i++;
-      if (i == 7) {
-        password[i] = '\0';
-        if (checkPassword(password)) {
-          openDoor();
-          i = 0; // Đặt lại biến đếm
-        } else {
-          incorrectAttemptCount++;
-          if (incorrectAttemptCount >= 3) {
-            beep(5000);
-            lockDoor();
-            RFIDMode = true;
-            incorrectAttemptCount = 0;
+      char key_pressed = keypad_key.getKey();  // Đọc phím nhấn từ bàn phím
+      if (key_pressed == '1') {  // Nếu người dùng nhấn '1' để thêm mật khẩu phụ
+        lcd.clear();  // Xóa màn hình LCD
+        lcd.print("Nhap Mat Khau Moi:");  // Hiển thị yêu cầu nhập mật khẩu mới
+        char newPassword[7];  // Mảng chứa mật khẩu mới
+        int i = 0;  // Biến đếm số ký tự nhập vào mật khẩu mới
+        while (i < 7) {  // Lặp lại khi chưa nhập đủ 7 ký tự
+          key_pressed = keypad_key.getKey();  // Đọc phím nhấn từ bàn phím
+          if (key_pressed && key_pressed != '*' && key_pressed != '#') {  // Nếu phím nhấn là một số
+            newPassword[i] = key_pressed;  // Lưu ký tự vào mật khẩu mới
+            i++;  // Tăng chỉ số để nhập ký tự tiếp theo
+            lcd.setCursor(i, 1);  // Đặt con trỏ tại vị trí ký tự mới
+            lcd.print('*');  // Hiển thị dấu '*' thay vì ký tự thực tế
+          } else if (key_pressed == '#') {  // Nếu người dùng nhấn '#' để xác nhận mật khẩu
+            keypadFunctions.addPassword(newPassword);  // Gọi hàm để thêm mật khẩu mới vào danh sách
+            break;  // Dừng vòng lặp
           }
         }
+      } else if (key_pressed == '2') {  // Nếu người dùng nhấn '2' để xóa thẻ phụ
+        lcd.clear();  // Xóa màn hình LCD
+        lcd.print("Quet The Can Xoa:");  // Hiển thị yêu cầu quét thẻ cần xóa
+        while (!rfidFunctions.mfrc522.PICC_IsNewCardPresent() || !rfidFunctions.mfrc522.PICC_ReadCardSerial());  // Chờ thẻ được quét
+        String tagToDelete = rfidFunctions.getTag();  // Lấy UID của thẻ cần xóa
+        rfidFunctions.mfrc522.PICC_HaltA();  // Dừng đọc thẻ
+        rfidFunctions.deleteTag(tagToDelete);  // Gọi hàm xóa thẻ khỏi danh sách
+      } else if (key_pressed == '3') {  // Nếu người dùng nhấn '3' để thêm thẻ phụ
+        lcd.clear();  // Xóa màn hình LCD
+        lcd.print("Quet The Phu:");  // Hiển thị yêu cầu quét thẻ phụ
+        while (!rfidFunctions.mfrc522.PICC_IsNewCardPresent() || !rfidFunctions.mfrc522.PICC_ReadCardSerial());  // Chờ thẻ được quét
+        String tagToAdd = rfidFunctions.getTag();  // Lấy UID của thẻ cần thêm
+        rfidFunctions.mfrc522.PICC_HaltA();  // Dừng đọc thẻ
+        rfidFunctions.addTag(tagToAdd);  // Gọi hàm thêm thẻ vào danh sách thẻ phụ
       }
-      lcd.setCursor(i, 1);
-      lcd.print('*');
+    } else {  // Nếu thẻ quét không phải thẻ chính
+      openDoor();  // Gọi hàm mở cửa
+    }
+  } else {  // Nếu không có thẻ RFID nào được quét
+    // Kiểm tra mật khẩu từ keypad
+    char key_pressed = keypad_key.getKey();  // Đọc phím nhấn từ bàn phím
+    if (key_pressed) {  // Nếu có phím nhấn
+      keypadFunctions.enteredPassword[keypadFunctions.passwordIndex] = key_pressed;  // Lưu ký tự vào mật khẩu đã nhập
+      keypadFunctions.passwordIndex++;  // Tăng chỉ số để nhập ký tự tiếp theo
+      if (keypadFunctions.passwordIndex == 7) {  // Nếu đã nhập đủ 7 ký tự
+        keypadFunctions.enteredPassword[keypadFunctions.passwordIndex] = '\0';  // Kết thúc mật khẩu nhập vào
+        if (keypadFunctions.checkPassword(keypadFunctions.enteredPassword)) {  // Kiểm tra nếu mật khẩu nhập đúng
+          openDoor();  // Mở cửa nếu mật khẩu đúng
+        } else {  // Nếu mật khẩu sai
+          rfidFunctions.incorrectAttemptCount++;  // Tăng số lần nhập sai mật khẩu
+          if (rfidFunctions.incorrectAttemptCount >= 3) {  // Nếu nhập sai 3 lần
+            rfidFunctions.lockDoor();  // Khóa cửa và phát còi
+          }
+        }
+        keypadFunctions.passwordIndex = 0;  // Đặt lại vị trí nhập mật khẩu
+      }
     }
   }
 }
